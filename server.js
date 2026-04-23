@@ -1,23 +1,46 @@
+/**
+ * Profiles API — Queryable Intelligence Engine (assignment)
+ *
+ * Search tags in this file:
+ *   CONFIG      — env, port, upstream timeout
+ *   APP         — Express + CORS (*)
+ *   SCHEMA      — Profile model (UUID v7 id, assignment fields)
+ *   INDEXES     — compound-friendly indexes for filter/sort
+ *   MIGRATE     — drop legacy `normalized_name_1` index if present
+ *   RESPONSE    — JSON shape helpers, UTC ISO timestamps
+ *   UPSTREAM    — Genderize / Agify / Nationalize + timeouts + 502 handling
+ *   QUERY       — GET /api/profiles: filters, sort, pagination, validation
+ *   NL_SEARCH   — GET /api/profiles/search: rule-based English -> Mongo filters
+ *   LIST        — shared list response { status, page, limit, total, data }
+ *   ROUTES      — POST/GET/DELETE handlers (route order: list & search before :id)
+ *
+ * npm start
+ */
+
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const { v7: uuidv7, validate: isUuid } = require("uuid");
 
+// CONFIG
 const app = express();
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 4000);
 
+// UPSTREAM — external demographic APIs used by POST /api/profiles
 const API = {
   genderize: "https://api.genderize.io",
   agify: "https://api.agify.io",
   nationalize: "https://api.nationalize.io"
 };
 
+// APP — CORS per assignment; JSON body for POST
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
+// SCHEMA — must match assignment table + seed.js
 const profileSchema = new mongoose.Schema(
   {
     id: { type: String, required: true, unique: true },
@@ -34,6 +57,7 @@ const profileSchema = new mongoose.Schema(
   { versionKey: false }
 );
 
+// INDEXES — support filtered/sorted queries without full collection scans where possible
 profileSchema.index({ gender: 1 });
 profileSchema.index({ age_group: 1 });
 profileSchema.index({ country_id: 1 });
@@ -44,6 +68,7 @@ profileSchema.index({ created_at: -1 });
 
 const Profile = mongoose.model("Profile", profileSchema);
 
+// MIGRATE — remove stale unique index from older schema (see seed.js)
 const dropLegacyIndexes = async () => {
   const indexes = await Profile.collection.indexes();
   const legacyIndexNames = indexes
@@ -55,6 +80,7 @@ const dropLegacyIndexes = async () => {
   }
 };
 
+// RESPONSE — assignment error envelope; profile JSON uses UTC ISO for created_at
 const sendError = (res, statusCode, message) =>
   res.status(statusCode).json({ status: "error", message });
 
@@ -71,6 +97,7 @@ const buildProfileResponse = (doc) => ({
   created_at: new Date(doc.created_at).toISOString()
 });
 
+// UPSTREAM — fetch with AbortController timeout; non-OK HTTP -> thrown for fetchExternalApi
 const fetchJsonWithTimeout = async (url) => {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
@@ -95,6 +122,7 @@ const fetchExternalApi = async (apiName, url) => {
   }
 };
 
+// Domain helpers for POST create flow
 const classifyAgeGroup = (age) => {
   if (age <= 12) return "child";
   if (age <= 19) return "teenager";
@@ -109,6 +137,7 @@ const getTopCountry = (countries) => {
   );
 };
 
+// QUERY — allowed enums and GET /api/profiles query keys (unknown key -> 422)
 const AGE_GROUPS = new Set(["child", "teenager", "adult", "senior"]);
 const SORTABLE_FIELDS = new Set(["age", "created_at", "gender_probability"]);
 const SORT_ORDERS = new Set(["asc", "desc"]);
@@ -126,6 +155,7 @@ const VALID_QUERY_KEYS = new Set([
   "limit"
 ]);
 
+// POST create: derive display country name from ISO code when storing new profiles
 const countryDisplay = new Intl.DisplayNames(["en"], { type: "region" });
 const getCountryNameFromCode = (countryCode) => {
   try {
@@ -135,6 +165,7 @@ const getCountryNameFromCode = (countryCode) => {
   }
 };
 
+// QUERY — strict string parsing for numeric query params (reject floats where ints required)
 const toStrictNumber = (value, min = -Infinity, max = Infinity) => {
   if (typeof value !== "string" || !value.trim()) return null;
   if (!/^-?\d+(\.\d+)?$/.test(value.trim())) return null;
@@ -144,6 +175,7 @@ const toStrictNumber = (value, min = -Infinity, max = Infinity) => {
   return parsed;
 };
 
+// QUERY — maps req.query -> Mongo filters + sort + page/limit; combined filters are ANDed
 const parseListParams = (rawQuery) => {
   const keys = Object.keys(rawQuery);
   const hasInvalidKey = keys.some((key) => !VALID_QUERY_KEYS.has(key));
@@ -279,6 +311,7 @@ const parseListParams = (rawQuery) => {
   return { filters, page, limit, sort };
 };
 
+// NL_SEARCH — rule-based only (no LLM); returns Mongo filter object + optional country phrase for lookup
 const parseNaturalLanguageQuery = (queryText) => {
   if (typeof queryText !== "string" || !queryText.trim()) return null;
   const text = queryText.toLowerCase().trim().replace(/\s+/g, " ");
@@ -351,6 +384,7 @@ const parseNaturalLanguageQuery = (queryText) => {
   return interpreted ? { filters, countryName } : null;
 };
 
+// LIST — paginated response shape required by assignment
 const listProfiles = async (res, params) => {
   const { filters, page, limit, sort } = params;
   const skip = (page - 1) * limit;
@@ -368,6 +402,7 @@ const listProfiles = async (res, params) => {
   });
 };
 
+// ROUTES — POST create from upstream APIs (UUID v7 id)
 app.post("/api/profiles", async (req, res) => {
   try {
     const { name } = req.body || {};
@@ -458,6 +493,7 @@ app.post("/api/profiles", async (req, res) => {
   }
 });
 
+// ROUTES — GET list: advanced filters + sort + pagination
 app.get("/api/profiles", async (req, res) => {
   try {
     const parsed = parseListParams(req.query);
@@ -470,6 +506,7 @@ app.get("/api/profiles", async (req, res) => {
   }
 });
 
+// ROUTES — GET natural language search (must be registered before /api/profiles/:id)
 app.get("/api/profiles/search", async (req, res) => {
   try {
     const { q, page, limit } = req.query;
@@ -516,6 +553,7 @@ app.get("/api/profiles/search", async (req, res) => {
   }
 });
 
+// ROUTES — GET one by UUID v7 `id` field (not Mongo _id)
 app.get("/api/profiles/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -537,6 +575,7 @@ app.get("/api/profiles/:id", async (req, res) => {
   }
 });
 
+// ROUTES — DELETE by UUID v7 `id`
 app.delete("/api/profiles/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -553,6 +592,7 @@ app.delete("/api/profiles/:id", async (req, res) => {
   }
 });
 
+// BOOT — Mongo connect, migrate legacy indexes, listen
 const startServer = async () => {
   if (!MONGODB_URI) {
     throw new Error("MONGODB_URI is required");
@@ -564,6 +604,7 @@ const startServer = async () => {
   });
 };
 
+// ENTRYPOINT
 startServer().catch((error) => {
   console.error("Failed to start server", error);
   process.exit(1);
