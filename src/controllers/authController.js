@@ -19,17 +19,25 @@ const {
 const { challengeFromVerifier } = require("../utils/pkce");
 const { sendError } = require("../utils/http");
 
+/**
+ * Split deploy (e.g. portal on one Railway host, API on another): credentialed
+ * cross-origin fetches require SameSite=None; Secure. Lax only sends cookies
+ * on same-site requests, so /api/me from a different origin would get no session.
+ */
+const sameSiteForSession = NODE_ENV === "production" ? "none" : "lax";
+const secureCookie = NODE_ENV === "production";
+
 const cookieOpts = {
   httpOnly: true,
-  secure: NODE_ENV === "production",
-  sameSite: "lax",
+  secure: secureCookie,
+  sameSite: sameSiteForSession,
   path: "/"
 };
 
 const csrfCookieOpts = {
   httpOnly: false,
-  secure: NODE_ENV === "production",
-  sameSite: "lax",
+  secure: secureCookie,
+  sameSite: sameSiteForSession,
   path: "/"
 };
 
