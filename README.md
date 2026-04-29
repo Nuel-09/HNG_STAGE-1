@@ -295,7 +295,7 @@ All errors use:
 
 ## CORS
 
-CORS uses `WEB_ORIGIN` (or reflects the request origin when set to `*`). `credentials: true` allows cookie-based auth from the web app.
+Set `WEB_ORIGIN` to the **exact** browser origin(s) of your web portal (scheme + host + port, no path; trailing slashes are ignored). Comma-separate for dev + production, e.g. `https://insighta-webportal-production.up.railway.app,http://localhost:5173`. With `credentials: true`, the allowed origin must match the `Origin` header or the browser will block `/api/*` (preflight can still return 204). If `WEB_ORIGIN` is `*`, the server reflects the request origin (dev only).
 
 ## Test Commands
 
