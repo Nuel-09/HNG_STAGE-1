@@ -11,46 +11,15 @@
  * npm run seed
  */
 
-require("dotenv").config();
 const fs = require("fs/promises");
 const path = require("path");
 const mongoose = require("mongoose");
 const { v7: uuidv7 } = require("uuid");
+const { MONGODB_URI, SEED_FILE: ENV_SEED_FILE } = require("./src/config/env");
+const { Profile, dropLegacyIndexes } = require("./src/models/profile");
 
 // CONFIG
-const MONGODB_URI = process.env.MONGODB_URI;
-const SEED_FILE = process.env.SEED_FILE || path.join(__dirname, "seed_profiles.json");
-
-// SCHEMA
-const profileSchema = new mongoose.Schema(
-  {
-    id: { type: String, required: true, unique: true },
-    name: { type: String, required: true, unique: true },
-    gender: { type: String, required: true, enum: ["male", "female"] },
-    gender_probability: { type: Number, required: true },
-    age: { type: Number, required: true },
-    age_group: { type: String, required: true, enum: ["child", "teenager", "adult", "senior"] },
-    country_id: { type: String, required: true, minlength: 2, maxlength: 2 },
-    country_name: { type: String, required: true },
-    country_probability: { type: Number, required: true },
-    created_at: { type: Date, required: true, default: () => new Date() }
-  },
-  { versionKey: false }
-);
-
-const Profile = mongoose.model("Profile", profileSchema);
-
-// MIGRATE — drop legacy unique index `normalized_name_1` left from an older Profile schema.
-const dropLegacyIndexes = async () => {
-  const indexes = await Profile.collection.indexes();
-  const legacyIndexNames = indexes
-    .map((index) => index.name)
-    .filter((name) => name === "normalized_name_1");
-
-  for (const indexName of legacyIndexNames) {
-    await Profile.collection.dropIndex(indexName);
-  }
-};
+const SEED_FILE = ENV_SEED_FILE || path.join(__dirname, "seed_profiles.json");
 
 // VALIDATE (per-row fields)
 const assertProfileShape = (profile, index) => {
