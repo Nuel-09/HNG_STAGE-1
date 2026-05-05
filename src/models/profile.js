@@ -15,7 +15,7 @@ const profileSchema = new mongoose.Schema(
   },
   { versionKey: false }
 );
-
+// single index for each field
 profileSchema.index({ gender: 1 });
 profileSchema.index({ age_group: 1 });
 profileSchema.index({ country_id: 1 });
@@ -23,6 +23,12 @@ profileSchema.index({ age: 1 });
 profileSchema.index({ gender_probability: 1 });
 profileSchema.index({ country_probability: 1 });
 profileSchema.index({ created_at: -1 });
+
+// Compound indexes for common list/search patterns (Stage 4B)
+// Equality fields first, then range/sort as appropriate.
+profileSchema.index({ country_id: 1, gender: 1, age: 1 });
+profileSchema.index({ country_id: 1, created_at: -1 });
+profileSchema.index({ gender: 1, age: 1 });
 
 const Profile = mongoose.models.Profile || mongoose.model("Profile", profileSchema);
 
