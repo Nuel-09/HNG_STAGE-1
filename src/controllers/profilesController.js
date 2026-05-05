@@ -1,8 +1,22 @@
+const fs = require("fs/promises");
 const { validate: isUuid } = require("uuid");
 const { UPSTREAM_TIMEOUT_MS } = require("../config/env");
 const { sendError, buildProfileResponse } = require("../utils/http");
 const { parseListParams } = require("../services/queryService");
 const { parseNaturalLanguageQuery } = require("../services/nlSearchService");
+const {
+  normalizeFilters,
+  buildCanonicalQueryKey,
+} = require("../services/queryNormalizationService");
+const {
+  getCached,
+  setCached,
+  clearByPrefix,
+} = require("../services/queryCacheService");
+const {
+  ingestProfilesCsv,
+  CsvImportCapacityError,
+} = require("../services/csvIngestionService");
 const {
   listProfiles,
   streamProfilesCsv,
@@ -10,8 +24,13 @@ const {
   createProfileFromName,
   resolveDuplicateCreate,
   deleteProfileById,
-  resolveCountryIdByName
+  resolveCountryIdByName,
 } = require("../services/profileService");
+
+const invalidateProfileQueryCaches = () => {
+  clearByPrefix("profiles:list:");
+  clearByPrefix("profiles:search:");
+};
 
 const createProfile = async (req, res) => {
   try {
@@ -22,13 +41,16 @@ const createProfile = async (req, res) => {
     if (typeof name !== "string") return sendError(res, 422, "Invalid type");
 
     const result = await createProfileFromName(name, UPSTREAM_TIMEOUT_MS);
+    if (result.statusCode === 201) invalidateProfileQueryCaches();
     return res.status(result.statusCode).json(result.body);
   } catch (error) {
     if (error?.code === 11000 && error?.keyPattern?.name) {
       const duplicate = await resolveDuplicateCreate(req.body?.name);
-      if (duplicate) return res.status(duplicate.statusCode).json(duplicate.body);
+      if (duplicate)
+        return res.status(duplicate.statusCode).json(duplicate.body);
     }
-    if (error?.statusCode) return sendError(res, error.statusCode, error.message);
+    if (error?.statusCode)
+      return sendError(res, error.statusCode, error.message);
     return sendError(res, 500, "Internal server error");
   }
 };
@@ -36,11 +58,26 @@ const createProfile = async (req, res) => {
 const getProfiles = async (req, res) => {
   try {
     const parsed = parseListParams(req.query);
-    if (parsed.error) return sendError(res, parsed.error.statusCode, parsed.error.message);
+    if (parsed.error)
+      return sendError(res, parsed.error.statusCode, parsed.error.message);
+
+    const canonicalFilters = normalizeFilters(parsed.filters);
+    const cacheKey = `profiles:list:${buildCanonicalQueryKey({
+      filters: canonicalFilters,
+      page: parsed.page,
+      limit: parsed.limit,
+      sort: parsed.sort,
+    })}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.status(200).json(cached);
+
     const basePath = `${req.baseUrl}${req.path}`;
-    return res.status(200).json(
-      await listProfiles(parsed, { basePath, query: req.query })
+    const response = await listProfiles(
+      { ...parsed, filters: canonicalFilters },
+      { basePath, query: req.query },
     );
+    setCached(cacheKey, response);
+    return res.status(200).json(response);
   } catch {
     return sendError(res, 500, "Internal server error");
   }
@@ -58,9 +95,13 @@ const exportProfiles = async (req, res) => {
 
     const { format: _omit, ...queryWithoutFormat } = req.query;
     const parsed = parseListParams(queryWithoutFormat);
-    if (parsed.error) return sendError(res, parsed.error.statusCode, parsed.error.message);
+    if (parsed.error)
+      return sendError(res, parsed.error.statusCode, parsed.error.message);
 
-    await streamProfilesCsv(res, { filters: parsed.filters, sort: parsed.sort });
+    await streamProfilesCsv(res, {
+      filters: parsed.filters,
+      sort: parsed.sort,
+    });
   } catch {
     if (!res.headersSent) {
       return sendError(res, 500, "Internal server error");
@@ -77,7 +118,10 @@ const searchProfiles = async (req, res) => {
     if (Array.isArray(q) || typeof q !== "string") {
       return sendError(res, 422, "Invalid query parameters");
     }
-    if ((page !== undefined && Array.isArray(page)) || (limit !== undefined && Array.isArray(limit))) {
+    if (
+      (page !== undefined && Array.isArray(page)) ||
+      (limit !== undefined && Array.isArray(limit))
+    ) {
       return sendError(res, 422, "Invalid query parameters");
     }
 
@@ -86,7 +130,11 @@ const searchProfiles = async (req, res) => {
 
     const parsedPagination = parseListParams({ page, limit });
     if (parsedPagination.error) {
-      return sendError(res, parsedPagination.error.statusCode, parsedPagination.error.message);
+      return sendError(
+        res,
+        parsedPagination.error.statusCode,
+        parsedPagination.error.message,
+      );
     }
 
     const searchFilters = { ...parsedText.filters };
@@ -95,18 +143,29 @@ const searchProfiles = async (req, res) => {
       if (countryId) searchFilters.country_id = countryId;
     }
 
+    const canonicalFilters = normalizeFilters(searchFilters);
+    const sort = { created_at: -1 };
+    const cacheKey = `profiles:search:${buildCanonicalQueryKey({
+      filters: canonicalFilters,
+      page: parsedPagination.page,
+      limit: parsedPagination.limit,
+      sort,
+    })}`;
+    const cached = getCached(cacheKey);
+    if (cached) return res.status(200).json(cached);
+
     const basePath = `${req.baseUrl}${req.path}`;
-    return res.status(200).json(
-      await listProfiles(
-        {
-          filters: searchFilters,
-          page: parsedPagination.page,
-          limit: parsedPagination.limit,
-          sort: { created_at: -1 }
-        },
-        { basePath, query: req.query }
-      )
+    const response = await listProfiles(
+      {
+        filters: canonicalFilters,
+        page: parsedPagination.page,
+        limit: parsedPagination.limit,
+        sort,
+      },
+      { basePath, query: req.query },
     );
+    setCached(cacheKey, response);
+    return res.status(200).json(response);
   } catch {
     return sendError(res, 500, "Internal server error");
   }
@@ -118,7 +177,9 @@ const getProfileById = async (req, res) => {
     if (!isUuid(id)) return sendError(res, 404, "Profile not found");
     const profile = await findProfileById(id);
     if (!profile) return sendError(res, 404, "Profile not found");
-    return res.status(200).json({ status: "success", data: buildProfileResponse(profile) });
+    return res
+      .status(200)
+      .json({ status: "success", data: buildProfileResponse(profile) });
   } catch {
     return sendError(res, 500, "Internal server error");
   }
@@ -130,9 +191,34 @@ const deleteProfile = async (req, res) => {
     if (!isUuid(id)) return sendError(res, 404, "Profile not found");
     const deleted = await deleteProfileById(id);
     if (!deleted) return sendError(res, 404, "Profile not found");
+    invalidateProfileQueryCaches();
     return res.status(204).send();
   } catch {
     return sendError(res, 500, "Internal server error");
+  }
+};
+
+const importProfilesCsv = async (req, res) => {
+  const filePath = req.file?.path;
+  if (!filePath) return sendError(res, 400, "Missing CSV file");
+
+  try {
+    const summary = await ingestProfilesCsv(filePath);
+    invalidateProfileQueryCaches();
+    return res.status(200).json(summary);
+  } catch (error) {
+    if (error instanceof CsvImportCapacityError) {
+      return sendError(res, 429, error.message);
+    }
+    if (
+      error?.message?.includes("Invalid Opening Quote") ||
+      error?.message?.includes("Parse Error")
+    ) {
+      return sendError(res, 422, "Invalid CSV format");
+    }
+    return sendError(res, 500, "Internal server error");
+  } finally {
+    await fs.unlink(filePath).catch(() => {});
   }
 };
 
@@ -140,7 +226,8 @@ module.exports = {
   createProfile,
   getProfiles,
   exportProfiles,
+  importProfilesCsv,
   searchProfiles,
   getProfileById,
-  deleteProfile
+  deleteProfile,
 };

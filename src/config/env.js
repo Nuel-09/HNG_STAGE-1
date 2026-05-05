@@ -52,5 +52,8 @@ module.exports = {
    * If true, POST /auth/github/token accepts the dummy code without a secret (anyone can mint stub tokens).
    * Use only while running an automated grader, then set back to false or unset.
    */
-  GRADER_OPEN_TEST_CODE: process.env.GRADER_OPEN_TEST_CODE === "true"
+  GRADER_OPEN_TEST_CODE: process.env.GRADER_OPEN_TEST_CODE === "true",
+  CSV_IMPORT_BATCH_SIZE: toPositiveInt(process.env.CSV_IMPORT_BATCH_SIZE, 1000),
+  CSV_IMPORT_MAX_CONCURRENCY: toPositiveInt(process.env.CSV_IMPORT_MAX_CONCURRENCY, 2),
+  CSV_IMPORT_FILE_SIZE_MB: toPositiveInt(process.env.CSV_IMPORT_FILE_SIZE_MB, 300)
 };
